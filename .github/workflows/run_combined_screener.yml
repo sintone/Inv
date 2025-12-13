@@ -3,7 +3,7 @@ name: Combined Stock Screener (Pro)
 on:
   # 每天北京时间 17:00 运行 (UTC 09:00)
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '20 8 * * *'
   # 允许手动触发
   workflow_dispatch:
 
