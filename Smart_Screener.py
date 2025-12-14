@@ -11,7 +11,6 @@ from tqdm import tqdm
 from datetime import datetime, timedelta
 
 # --- 全局配置 ---
-# 优先从环境变量读取，本地运行则使用默认值
 TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", 'b249a314d4a8db3e43f44db9d5524f31f3425fde397fc9c4633bf9a9')
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK", "")
 
@@ -26,20 +25,28 @@ cache_data = {
     'financial_snapshot': {}
 }
 
-# --- 飞书发送模块 (新增) ---
+# --- 飞书发送模块 (增强版：全量+行业概念) ---
 def send_feishu_summary(result_dict):
     """
-    将筛选结果整理为文本摘要发送到飞书
+    将筛选结果整理为详细文本发送到飞书
     """
     if not FEISHU_WEBHOOK_URL:
         print(">> 未配置 FEISHU_WEBHOOK，跳过发送")
         return
 
-    msg_lines = []
     current_time = datetime.now().strftime('%m-%d %H:%M')
-    msg_lines.append(f"📊 **精算版筛选报告** ({current_time})")
-    msg_lines.append("----------------")
+    
+    # 定义发送函数，避免逻辑重复
+    def post_msg(text_content):
+        headers = {'Content-Type': 'application/json'}
+        payload = {"msg_type": "text", "content": {"text": text_content}}
+        try:
+            requests.post(FEISHU_WEBHOOK_URL, headers=headers, data=json.dumps(payload))
+        except Exception as e:
+            print(f">> 飞书发送片段失败: {e}")
 
+    # 总消息缓存
+    all_content = [f"📊 **精算版筛选报告** ({current_time})", "----------------"]
     has_data = False
     
     # 遍历结果字典
@@ -48,43 +55,68 @@ def send_feishu_summary(result_dict):
             continue
         
         has_data = True
-        # 简化标题，去掉前面的数字编号
+        # 简化标题
         clean_title = title.split('_')[-1] if '_' in title else title
-        msg_lines.append(f"\n📌 {clean_title} (Top 5/{len(df)})")
+        all_content.append(f"\n📌 {clean_title} (共{len(df)}只)")
         
-        # 只取前5个展示在飞书，避免消息过长
-        top_n = df.head(5)
-        for _, row in top_n.iterrows():
-            # 格式：名称(代码) | 估值:X | 7日:Y%
+        # 表头
+        all_content.append(f"代码 | 名称 | 行业 | 概念 | 估值 | 7日%")
+        
+        # [修改点]：这里不再限制 head(5)，而是放开限制
+        # 注意：如果超过50条，建议截断，否则飞书接口会报错。这里设为50
+        display_df = df.head(50) 
+        
+        for _, row in display_df.iterrows():
+            # 获取字段，处理空值
+            code = row.get('ts_code', '')[-6:] # 只取数字部分
             name = row.get('name', 'N/A')
-            code = row.get('ts_code', '')
+            # [新增] 行业和概念
+            industry = row.get('industry', '-')
+            # 概念可能很长，截取前4个字
+            concept = str(row.get('concept_name', '-'))[:4]
+            
             val_ratio = row.get('valuation_ratio', 0)
             chg7 = row.get('day_7_chg', 0)
             
-            # 处理可能的 NaN
             val_str = f"{val_ratio:.2f}" if pd.notna(val_ratio) else "-"
-            chg_str = f"{chg7:.1f}%" if pd.notna(chg7) else "-"
+            chg_str = f"{chg7:.1f}" if pd.notna(chg7) else "-"
             
-            line = f"{name}({code}) | 估值:{val_str} | 7日:{chg_str}"
-            msg_lines.append(line)
+            # 拼接单行
+            line = f"{code}|{name}|{industry}|{concept}|{val_str}|{chg_str}%"
+            all_content.append(line)
+        
+        if len(df) > 50:
+            all_content.append(f"...(剩余 {len(df)-50} 只请查看HTML)")
 
     if not has_data:
-        msg_lines.append("今日无符合条件的筛选结果。")
+        all_content.append("今日无符合条件的筛选结果。")
     else:
-        msg_lines.append("\n💡 完整HTML报告已保存至 GitHub Artifacts")
+        all_content.append("\n💡 完整HTML报告请在 GitHub Artifacts 下载")
 
-    # 发送请求
-    full_text = "\n".join(msg_lines)
-    headers = {'Content-Type': 'application/json'}
-    payload = {"msg_type": "text", "content": {"text": full_text}}
+    # [关键] 分段发送逻辑
+    # 飞书通常限制富文本大小，这里按字符数简单切分防止发送失败
+    # 一个消息大概限制 4000 字符，安全起见我们按 50 行一批发送
     
-    try:
-        requests.post(FEISHU_WEBHOOK_URL, headers=headers, data=json.dumps(payload))
-        print(">> 飞书摘要已发送")
-    except Exception as e:
-        print(f">> 飞书发送失败: {e}")
+    chunk_size = 40 # 每条消息包含多少行
+    current_chunk = []
+    
+    print(f">> 准备发送飞书，共 {len(all_content)} 行内容...")
+    
+    for line in all_content:
+        current_chunk.append(line)
+        # 如果当前块积累够了，或者这是新的标题段落前，发送
+        if len(current_chunk) >= chunk_size:
+            post_msg("\n".join(current_chunk))
+            current_chunk = [] # 清空
+            time.sleep(0.5) # 稍微歇一下防止频率限制
+            
+    # 发送剩余的
+    if current_chunk:
+        post_msg("\n".join(current_chunk))
+        
+    print(">> 飞书发送完成")
 
-# --- 基础工具 (保持原逻辑) ---
+# --- 基础工具 (逻辑不变) ---
 
 def get_last_trade_day():
     now = datetime.now()
@@ -128,7 +160,6 @@ def get_latest_financial_snapshot(ts_code, trade_date):
         df_mv = pro.daily_basic(ts_code=ts_code, trade_date=trade_date, fields='total_mv')
         if not df_mv.empty: res['total_mv_wan'] = df_mv.iloc[0]['total_mv']
         
-        # 简化合并逻辑，保留核心获取部分
         time.sleep(API_CALL_DELAY)
         df_bal = pro.balancesheet(ts_code=ts_code, start_date=start_dt, fields='end_date,acct_recv,accounts_receiv,total_assets')
         if not df_bal.empty:
@@ -182,7 +213,7 @@ def get_precise_per_capita_mv(ts_code, total_float_share, close_price, trade_dat
         return (retail_shares * close_price) / retail_holders
     except: return None
 
-# --- 核心逻辑 ---
+# --- 核心逻辑 (逻辑不变) ---
 
 class SmartSelector:
     def __init__(self):
@@ -275,7 +306,6 @@ class SmartSelector:
         return res
 
     def generate_html_report(self, result_dict):
-        # 保持原有的HTML生成逻辑不变，只修改文件写入路径适应GitHub Actions
         print("\n>>> 生成HTML报表...")
         html_content = f"<html><head><meta charset='utf-8'><title>筛选报告</title></head><body><h1>精算版筛选报告 {datetime.now()}</h1>"
         for title, df in result_dict.items():
@@ -285,7 +315,6 @@ class SmartSelector:
                 html_content += df[final_cols].rename(columns=self.output_columns_map).to_html(index=False, classes='display')
         html_content += "</body></html>"
         
-        # 固定文件名，方便GitHub Artifacts上传
         filename = "smart_report.html"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(html_content)
@@ -300,5 +329,5 @@ if __name__ == "__main__":
     # 1. 生成 HTML (供 Artifacts 上传)
     app.generate_html_report(results)
     
-    # 2. 发送飞书文本摘要 (直接推送到手机)
+    # 2. 发送飞书文本摘要 (全量分段发送)
     send_feishu_summary(results)
