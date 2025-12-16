@@ -1,0 +1,43 @@
+name: HK Stock Screener
+
+on:
+  schedule:
+    # 每天北京时间 16:45 运行 (UTC 08:45)
+    - cron: '40 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  run_hk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # 安装 TA-Lib C库
+      - name: Install TA-Lib C Library
+        run: |
+          wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+          tar -xzf ta-lib-0.4.0-src.tar.gz
+          cd ta-lib/
+          ./configure --prefix=/usr
+          make
+          sudo make install
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run HK Screener
+        env:
+          # 传入 Secrets
+          PROXY_API_KEY: ${{ secrets.PROXY_API_KEY }}
+          PROXY_API_PWD: ${{ secrets.PROXY_API_PWD }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: python HK_Screener.py
