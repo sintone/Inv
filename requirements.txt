@@ -4,3 +4,4 @@ requests
 tushare
 tqdm
 TA-Lib
+akshare
