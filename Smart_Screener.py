@@ -11,7 +11,6 @@ from tqdm import tqdm
 from datetime import datetime, timedelta
 
 # --- 全局配置 ---
-# 优先从环境变量读取，本地运行则使用默认值
 TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", 'b249a314d4a8db3e43f44db9d5524f31f3425fde397fc9c4633bf9a9')
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK", "")
 
@@ -26,11 +25,10 @@ cache_data = {
     'financial_snapshot': {}
 }
 
-# --- 飞书发送模块 (增强格式版) ---
+# --- 飞书发送模块 (增强版：全量+行业概念) ---
 def send_feishu_summary(result_dict):
     """
     将筛选结果整理为详细文本发送到飞书
-    格式参考：代码: 名称 (Code), 行业: ..., 估值: ...
     """
     if not FEISHU_WEBHOOK_URL:
         print(">> 未配置 FEISHU_WEBHOOK，跳过发送")
@@ -38,7 +36,7 @@ def send_feishu_summary(result_dict):
 
     current_time = datetime.now().strftime('%m-%d %H:%M')
     
-    # 定义发送函数
+    # 定义发送函数，避免逻辑重复
     def post_msg(text_content):
         headers = {'Content-Type': 'application/json'}
         payload = {"msg_type": "text", "content": {"text": text_content}}
@@ -47,11 +45,8 @@ def send_feishu_summary(result_dict):
         except Exception as e:
             print(f">> 飞书发送片段失败: {e}")
 
-    # 总消息列表
-    all_content = []
-    all_content.append(f"📊 精算版筛选报告 ({current_time})")
-    all_content.append("="*40)
-
+    # 总消息缓存
+    all_content = [f"📊 **精算版筛选报告** ({current_time})", "----------------"]
     has_data = False
     
     # 遍历结果字典
@@ -60,66 +55,60 @@ def send_feishu_summary(result_dict):
             continue
         
         has_data = True
-        # 简化标题，去掉前面的数字编号
+        # 简化标题
         clean_title = title.split('_')[-1] if '_' in title else title
-        all_content.append(f"\n=== {clean_title} (共 {len(df)} 只) ===")
+        all_content.append(f"\n📌 {clean_title} (共{len(df)}只)")
         
-        # 显示前 50 条，防止消息过大
-        display_df = df.head(50)
+        # 表头
+        all_content.append(f"代码 | 名称 | 行业 | 概念 | 估值 | 7日%")
+        
+        # [修改点]：这里不再限制 head(5)，而是放开限制
+        # 注意：如果超过50条，建议截断，否则飞书接口会报错。这里设为50
+        display_df = df.head(50) 
         
         for _, row in display_df.iterrows():
-            # 1. 基础信息
-            ts_code = row.get('ts_code', 'N/A') # 完整代码，不截取
+            # 获取字段，处理空值
+            code = row.get('ts_code', '')[-6:] # 只取数字部分
             name = row.get('name', 'N/A')
+            # [新增] 行业和概念
             industry = row.get('industry', '-')
-            concept = str(row.get('concept_name', '-'))
-            # 如果概念太长，适当截断以保持整洁
-            if len(concept) > 8: concept = concept[:8] + "..."
+            # 概念可能很长，截取前4个字
+            concept = str(row.get('concept_name', '-'))[:4]
             
-            # 2. 数据格式化
-            # 估值
-            val = row.get('valuation_ratio', 0)
-            val_str = f"{val:.2f}" if pd.notna(val) else "-"
-            
-            # 7日涨跌
+            val_ratio = row.get('valuation_ratio', 0)
             chg7 = row.get('day_7_chg', 0)
-            chg7_str = f"{chg7:.2f}%" if pd.notna(chg7) else "-"
             
-            # 现价 (从daily_basic获取的close)
-            # 注意：step1 中获取了 'close' 并存入 pool，step2 中有 pct_chg
-            close_price = row.get('close', 0)
-            close_str = f"{close_price:.2f}" if pd.notna(close_price) else "-"
+            val_str = f"{val_ratio:.2f}" if pd.notna(val_ratio) else "-"
+            chg_str = f"{chg7:.1f}" if pd.notna(chg7) else "-"
             
-            # 换手率
-            turnover = row.get('turnover_rate', 0)
-            turn_str = f"{turnover:.2f}%" if pd.notna(turnover) else "-"
-
-            # 3. 拼接单行 (参考您的要求：列名放在数据前面)
-            # 格式：  代码: 名称 (Code), 行业: XX, 概念: XX, 估值: XX, 7日涨跌: XX%, 现价: XX, 换手: XX%
-            line = f"  代码: {name} ({ts_code}), 行业: {industry}, 概念: {concept}, 估值: {val_str}, 7日涨跌幅: {chg7_str}, 现价: {close_str}, 换手率: {turn_str}"
+            # 拼接单行
+            line = f"{code}|{name}|{industry}|{concept}|{val_str}|{chg_str}%"
             all_content.append(line)
         
         if len(df) > 50:
-            all_content.append(f"  ... (剩余 {len(df)-50} 只请查看HTML报告)")
+            all_content.append(f"...(剩余 {len(df)-50} 只请查看HTML)")
 
     if not has_data:
         all_content.append("今日无符合条件的筛选结果。")
     else:
-        all_content.append("\n💡 完整HTML报告已保存至 GitHub Artifacts")
+        all_content.append("\n💡 完整HTML报告请在 GitHub Artifacts 下载")
 
-    # 分段发送逻辑 (因单行内容变长，减少 chunk_size 防止超限)
-    chunk_size = 20 # 每条消息约20行股票
+    # [关键] 分段发送逻辑
+    # 飞书通常限制富文本大小，这里按字符数简单切分防止发送失败
+    # 一个消息大概限制 4000 字符，安全起见我们按 50 行一批发送
+    
+    chunk_size = 40 # 每条消息包含多少行
     current_chunk = []
     
     print(f">> 准备发送飞书，共 {len(all_content)} 行内容...")
     
     for line in all_content:
         current_chunk.append(line)
-        # 如果当前块积累够了，发送
+        # 如果当前块积累够了，或者这是新的标题段落前，发送
         if len(current_chunk) >= chunk_size:
             post_msg("\n".join(current_chunk))
             current_chunk = [] # 清空
-            time.sleep(0.5) # 避免触发频率限制
+            time.sleep(0.5) # 稍微歇一下防止频率限制
             
     # 发送剩余的
     if current_chunk:
@@ -127,7 +116,7 @@ def send_feishu_summary(result_dict):
         
     print(">> 飞书发送完成")
 
-# --- 基础工具 (保持原逻辑) ---
+# --- 基础工具 (逻辑不变) ---
 
 def get_last_trade_day():
     now = datetime.now()
@@ -224,7 +213,7 @@ def get_precise_per_capita_mv(ts_code, total_float_share, close_price, trade_dat
         return (retail_shares * close_price) / retail_holders
     except: return None
 
-# --- 核心逻辑 (保持原逻辑) ---
+# --- 核心逻辑 (逻辑不变) ---
 
 class SmartSelector:
     def __init__(self):
@@ -317,7 +306,6 @@ class SmartSelector:
         return res
 
     def generate_html_report(self, result_dict):
-        # 保持原有的HTML生成逻辑不变，只修改文件写入路径适应GitHub Actions
         print("\n>>> 生成HTML报表...")
         html_content = f"<html><head><meta charset='utf-8'><title>筛选报告</title></head><body><h1>精算版筛选报告 {datetime.now()}</h1>"
         for title, df in result_dict.items():
@@ -327,7 +315,6 @@ class SmartSelector:
                 html_content += df[final_cols].rename(columns=self.output_columns_map).to_html(index=False, classes='display')
         html_content += "</body></html>"
         
-        # 固定文件名，方便GitHub Artifacts上传
         filename = "smart_report.html"
         with open(filename, "w", encoding="utf-8") as f:
             f.write(html_content)
@@ -342,5 +329,5 @@ if __name__ == "__main__":
     # 1. 生成 HTML (供 Artifacts 上传)
     app.generate_html_report(results)
     
-    # 2. 发送飞书文本摘要 (直接推送到手机)
+    # 2. 发送飞书文本摘要 (全量分段发送)
     send_feishu_summary(results)
