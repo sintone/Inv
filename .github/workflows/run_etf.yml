@@ -1,13 +1,9 @@
 name: Daily ETF Screener
 
 on:
-  # 1. 定时触发
   schedule:
-    # 北京时间 16:25 = UTC时间 08:25
-    # 格式：分 时 日 月 周
+    # 每天北京时间 16:30 运行
     - cron: '30 8 * * *'
-  
-  # 2. 允许手动按钮触发 (方便您马上测试)
   workflow_dispatch:
 
 jobs:
@@ -15,16 +11,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code (拉取代码)
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Python (设置环境)
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      # --- 关键步骤：安装 TA-Lib 的底层 C 库 ---
-      # GitHub 的 Ubuntu 服务器默认没有这个库，必须手动编译安装，否则 pip install TA-Lib 会报错
       - name: Install TA-Lib C Library
         run: |
           wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
@@ -33,12 +27,16 @@ jobs:
           ./configure --prefix=/usr
           make
           sudo make install
-      # ---------------------------------------
 
-      - name: Install Dependencies (安装Python库)
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # 如果没有 requirements.txt，可以直接在此安装
+          pip install pandas numpy tushare talib-binary requests tqdm
 
-      - name: Run Script (运行代码)
+      - name: Run Script
+        env:
+          # 💡 这里是关键：将 Secrets 注入环境变量
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
         run: python Daily_ETF.py
