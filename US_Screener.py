@@ -16,8 +16,8 @@ import akshare as ak
 
 # ================= 配置区域 (改为从环境变量读取) =================
 # 代理商鉴权信息 (请在 GitHub Secrets 中配置)
-API_KEY = os.environ.get("PROXY_API_KEY", "L4U5680Y") 
-API_PWD = os.environ.get("PROXY_API_PWD", "412E4561D849")
+API_KEY = os.environ.get("PROXY_API_KEY", "") 
+API_PWD = os.environ.get("PROXY_API_PWD", "")
 
 # 飞书 Webhook 地址
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK", "")
