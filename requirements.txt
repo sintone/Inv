@@ -5,4 +5,3 @@ tushare
 tqdm
 TA-Lib
 akshare
-os
