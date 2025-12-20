@@ -11,7 +11,7 @@ from tqdm import tqdm
 from datetime import datetime, timedelta
 
 # --- 全局配置 ---
-TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", 'b249a314d4a8db3e43f44db9d5524f31f3425fde397fc9c4633bf9a9')
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", '')
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK", "")
 
 ts.set_token(TUSHARE_TOKEN)
