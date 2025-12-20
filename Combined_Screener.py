@@ -17,7 +17,7 @@ import traceback
 # ==============================================================================
 
 # 1. 优先从环境变量获取Token和Webhook (适配GitHub Actions)
-TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "b249a314d4a8db3e43f44db9d5524f31f3425fde397fc9c4633bf9a9")
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "")
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK", "") 
 
 # 初始化 Tushare
