@@ -1,0 +1,52 @@
+name: A-Share Intraday Screener
+
+on:
+  schedule:
+    # 1. 11:35 AM Beijing Time -> 03:35 UTC
+    - cron: '35 3 * * 1-5'
+    # 2. 14:15 PM Beijing Time -> 06:15 UTC
+    - cron: '15 6 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run_intraday:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # 安装 TA-Lib C库
+      - name: Install TA-Lib C Library
+        run: |
+          wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+          tar -xzf ta-lib-0.4.0-src.tar.gz
+          cd ta-lib/
+          ./configure --prefix=/usr
+          make
+          sudo make install
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Intraday Script
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: python Intraday_Screener.py
+
+      # 上传结果 CSV
+      - name: Upload Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Intraday-Results
+          path: Intraday_Result_*.csv
+          retention-days: 7
