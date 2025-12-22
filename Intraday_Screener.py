@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-@Description: A股盘中实时筛选 (脚本1逻辑: 动态换手率 & 实时价>均线)
+@Description: A股盘中实时筛选 (修复版 - 解决字段冲突问题)
 @RunTime: 建议在 11:35 和 14:15 运行
 """
 import tushare as ts
@@ -16,7 +16,7 @@ import traceback
 from tqdm import tqdm
 
 # ================= 配置区域 =================
-TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "")
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "b249a314d4a8db3e43f44db9d5524f31f3425fde397fc9c4633bf9a9")
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK", "")
 
 # 初始化
@@ -44,12 +44,12 @@ def send_feishu_msg(title, content):
 # ================= 核心工具函数 =================
 
 def get_beijing_now():
-    """获取当前的北京时间 (处理GitHub Actions UTC时区问题)"""
+    """获取当前的北京时间"""
     utc_now = datetime.datetime.utcnow()
     return utc_now + datetime.timedelta(hours=8)
 
 def get_last_trade_day_history():
-    """获取上一个确定的收盘交易日 (用于获取历史K线)"""
+    """获取上一个确定的收盘交易日"""
     now = get_beijing_now()
     check_date = now - datetime.timedelta(days=1)
     for _ in range(10):
@@ -63,47 +63,41 @@ def get_last_trade_day_history():
     return None
 
 def calculate_dynamic_threshold(base_threshold=2.5):
-    """
-    根据当前北京时间，动态计算换手率阈值
-    算法: 2.5% * (已交易分钟数 / 全天240分钟)
-    """
+    """根据当前北京时间，动态计算换手率阈值"""
     now = get_beijing_now()
     
-    # 定义关键时间点
     t_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
     t_lunch_start = now.replace(hour=11, minute=30, second=0, microsecond=0)
     t_lunch_end = now.replace(hour=13, minute=0, second=0, microsecond=0)
     t_close = now.replace(hour=15, minute=0, second=0, microsecond=0)
     
     minutes_elapsed = 0
-    total_minutes = 240.0 # 4小时
+    total_minutes = 240.0 
     
     if now < t_open:
-        minutes_elapsed = 0 # 开盘前
+        minutes_elapsed = 0 
     elif now <= t_lunch_start:
         minutes_elapsed = (now - t_open).total_seconds() / 60
     elif now <= t_lunch_end:
-        minutes_elapsed = 120 # 午休期间算作上午结束
+        minutes_elapsed = 120 
     elif now <= t_close:
-        morning_minutes = 120
-        afternoon_minutes = (now - t_lunch_end).total_seconds() / 60
-        minutes_elapsed = morning_minutes + afternoon_minutes
+        minutes_elapsed = 120 + (now - t_lunch_end).total_seconds() / 60
     else:
-        minutes_elapsed = 240 # 收盘后
+        minutes_elapsed = 240 
         
-    # 计算比例
     ratio = minutes_elapsed / total_minutes
     if ratio > 1.0: ratio = 1.0
-    if ratio < 0.05: ratio = 0.05 # 刚开盘给个保底比例，防止除以0或阈值过低
+    if ratio < 0.05: ratio = 0.05 
     
     dynamic_val = base_threshold * ratio
     return round(dynamic_val, 2), int(ratio * 100)
 
 def get_realtime_snapshot(stock_basics_df):
-    """获取全市场实时行情"""
+    """
+    获取全市场实时行情，并计算实时换手率
+    """
     print(">> 正在获取全市场实时行情 (Sina接口)...")
     
-    # 建立 code (6位) -> ts_code 映射
     code_map = {code.split('.')[0]: code for code in stock_basics_df['ts_code']}
     code_list = list(code_map.keys())
     
@@ -133,7 +127,15 @@ def get_realtime_snapshot(stock_basics_df):
     
     full_realtime['ts_code'] = full_realtime['code'].map(code_map)
     
-    # 合并基本面 (获取流通股本)
+    # === [关键修复] ===
+    # 实时接口里有 'name'，stock_basics_df 里也有 'name'。
+    # 直接 merge 会导致 columns 变成 name_x, name_y，导致后续报错。
+    # 我们主动删除实时接口的 name，信任 Tushare 基础表里的 name。
+    if 'name' in full_realtime.columns:
+        full_realtime = full_realtime.drop(columns=['name'])
+    # ==================
+    
+    # 合并基本面
     merged_df = pd.merge(full_realtime, stock_basics_df[['ts_code', 'name', 'float_share', 'industry']], on='ts_code', how='inner')
     
     # 计算实时换手率
@@ -187,7 +189,9 @@ def run_intraday_screener():
     # 1. 确定日期
     last_trade_day_hist = get_last_trade_day_history()
     print(f"历史数据基准日: {last_trade_day_hist}")
-    if not last_trade_day_hist: return
+    if not last_trade_day_hist: 
+        print("未获取到历史基准日")
+        return
 
     # 2. 计算动态阈值
     BASE_THRESHOLD = 2.5
@@ -244,7 +248,7 @@ def run_intraday_screener():
     
     msg_lines = []
     # 头部信息增加进度提示
-    msg_lines.append(f"时间进度: {progress_pct}% | 动态阈值: >{dynamic_threshold}%")
+    msg_lines.append(f"进度: {progress_pct}% | 阈值: >{dynamic_threshold}%")
     
     if not df_final.empty:
         df_final = df_final.sort_values('turnover_rate_now', ascending=False)
@@ -255,8 +259,8 @@ def run_intraday_screener():
         # 展示前 20 个
         for _, row in df_final.head(20).iterrows():
             code = row['ts_code'].split('.')[0]
-            name = row['name']
-            ind = row['industry']
+            name = row.get('name', 'N/A')  # 修复后这里能取到值了
+            ind = row.get('industry', '-')
             price = f"{row['price']:.2f}"
             pct = f"{row['pct_chg_now']:.2f}%"
             turn = f"{row['turnover_rate_now']:.2f}%"
@@ -268,7 +272,10 @@ def run_intraday_screener():
             
         # 保存 CSV
         timestamp = datetime.datetime.now().strftime('%H%M')
-        df_final.to_csv(f'Intraday_{timestamp}.csv', index=False, encoding='utf-8-sig')
+        # GitHub Actions 中如果不指定路径，默认在根目录
+        csv_filename = f'Intraday_{timestamp}.csv'
+        df_final.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+        print(f"CSV文件已生成: {csv_filename}")
         
     else:
         msg_lines.append("换手率达标，但技术形态未确认。")
@@ -280,5 +287,6 @@ if __name__ == "__main__":
     try:
         run_intraday_screener()
     except Exception as e:
+        # 打印详细堆栈，方便排查
         traceback.print_exc()
-        send_feishu_msg("盘中脚本出错", str(e))
+        send_feishu_msg("盘中脚本出错", f"{str(e)}\n{traceback.format_exc()}")
