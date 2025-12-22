@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-@Description: A股盘中实时筛选 (完整复刻脚本1: 8步筛选+严苛财务)
+@Description: A股盘中实时筛选 (完整复刻脚本1: 8步筛选+严苛财务+详尽报告)
 @RunTime: 建议 11:35 / 14:15
 """
 import tushare as ts
@@ -27,13 +27,17 @@ API_CALL_DELAY = 0.02
 def send_feishu_msg(title, content):
     if not FEISHU_WEBHOOK_URL:
         print(f"【模拟发送】{title}")
+        print(content)
         return
     beijing_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     current_time = beijing_now.strftime('%m-%d %H:%M')
-    full_text = f"【{title}】\n{current_time}\n--------------------\n{content}"
+    full_text = f"【{title}】\n{current_time}\n{'='*20}\n{content}"
+    
+    # 飞书消息分段发送，防止过长
+    # 如果内容超过300行或者字符数过多，可以考虑切分，这里先一次性发
     headers = {'Content-Type': 'application/json'}
     try:
-        requests.post(FEISHU_WEBHOOK_URL, headers=headers, data=json.dumps({"msg_type": "text", "content": {"text": full_text}}), timeout=10)
+        requests.post(FEISHU_WEBHOOK_URL, headers=headers, data=json.dumps({"msg_type": "text", "content": {"text": full_text}}), timeout=15)
     except Exception as e: print(f"飞书发送报错: {e}")
 
 def get_beijing_now():
@@ -95,10 +99,8 @@ def get_realtime_snapshot(stock_basics_df):
     full = full[full['price'] > 0].copy()
     full['ts_code'] = full['code'].map(code_map)
     
-    # 删除冲突列名
     if 'name' in full.columns: full = full.drop(columns=['name'])
     
-    # 合并基本面
     merged = pd.merge(full, stock_basics_df[['ts_code', 'name', 'float_share', 'total_share', 'industry']], on='ts_code', how='inner')
     
     # 计算实时指标
@@ -110,20 +112,13 @@ def get_realtime_snapshot(stock_basics_df):
 def get_financial_data(ts_code, trade_date):
     """获取财务数据 (Step 4 & 7)"""
     try:
-        # 财务指标
-        df_ind = pro.fina_indicator(ts_code=ts_code, period='20241231', fields='end_date,profit_dedt,q_dtprofit')
-        # 利润表
-        df_income = pro.income(ts_code=ts_code, period='20241231', fields='end_date,revenue,report_type')
-        
-        # 简单的容错获取（如果没有2024年报就往前找）
-        if df_income.empty:
-             df_income = pro.income(ts_code=ts_code, limit=2, fields='end_date,revenue,report_type')
-        if df_ind.empty:
-             df_ind = pro.fina_indicator(ts_code=ts_code, limit=2, fields='end_date,profit_dedt')
+        # 尝试获取最新一期年报，如果没有则获取最新一期季报
+        df_ind = pro.fina_indicator(ts_code=ts_code, limit=2, fields='end_date,profit_dedt,q_dtprofit')
+        df_income = pro.income(ts_code=ts_code, limit=2, fields='end_date,revenue,report_type')
              
         if df_income.empty or df_ind.empty: return None
         
-        # 合并
+        # 简单取最新一条非空数据
         rev = df_income.iloc[0]['revenue']
         prof_dedt = df_ind.iloc[0]['profit_dedt']
         
@@ -138,12 +133,10 @@ def get_holders_data(ts_code, trade_date):
     try:
         start_dt = (pd.to_datetime(trade_date) - datetime.timedelta(days=365)).strftime('%Y%m%d')
         
-        # 股东人数
         df_h = pro.stk_holdernumber(ts_code=ts_code, start_date=start_dt)
         if df_h.empty: return None
         holder_num = df_h.sort_values('end_date', ascending=False).iloc[0]['holder_num']
         
-        # 前十大
         df_top10 = pro.top10_floatholders(ts_code=ts_code, start_date=start_dt)
         top10_sum = 0
         if not df_top10.empty:
@@ -155,7 +148,6 @@ def get_holders_data(ts_code, trade_date):
 
 def classify_growth(ts_code):
     """Step 7.4 增长分类"""
-    # 简版：只判断最近一期营收和利润是否增长
     try:
         df = pro.income(ts_code=ts_code, limit=5, fields='end_date,revenue')
         df_prof = pro.fina_indicator(ts_code=ts_code, limit=5, fields='end_date,profit_dedt')
@@ -170,6 +162,17 @@ def classify_growth(ts_code):
         if prof_grow: return "净利增"
         return "双降"
     except: return "未知"
+
+def get_concept(ts_code):
+    """补充概念信息 (仅对最终入选者调用)"""
+    try:
+        df = pro.concept_detail(ts_code=ts_code)
+        if not df.empty:
+            # 拼接前3个概念
+            concepts = df['concept_name'].unique()[:3]
+            return ",".join(concepts)
+    except: pass
+    return "-"
 
 # ================= 核心筛选逻辑 =================
 
@@ -205,8 +208,6 @@ def run_intraday_screener():
 
     # 4. 循环处理 Step 2, 5, 6 (需要历史K线)
     final_candidates = []
-    
-    # 限制处理数量防止超时，优先处理换手率高的
     process_list = df_pass1.sort_values('turnover_rate_now', ascending=False).head(300).to_dict('records')
     
     print("Step 2/5/6: 均线与形态分析...")
@@ -216,7 +217,6 @@ def run_intraday_screener():
         ts_code = row['ts_code']
         curr_p = float(row['price'])
         
-        # 获取历史K线
         try:
             df_hist = pro.daily(ts_code=ts_code, start_date=start_date_hist, end_date=last_trade_day)
         except: continue
@@ -224,7 +224,6 @@ def run_intraday_screener():
         if df_hist is None or len(df_hist) < 120: continue
         df_hist = df_hist.sort_values('trade_date', ascending=True)
         
-        # 构造混合序列计算今日MA
         closes = df_hist['close'].values.tolist()
         closes.append(curr_p)
         arr = np.array(closes)
@@ -239,47 +238,46 @@ def run_intraday_screener():
         if not (curr_p > ma20 and curr_p > ma60 and curr_p > ma120):
             continue
             
-        # Step 6: 昨日收盘价 <= 昨日三均线
-        # 昨日数据的 index 是 -2 (因为 -1 是今天实时的)
-        # 重新计算昨日的MA值
+        # Step 6: 昨日收盘价形态
         try:
             prev_close = closes[-2]
-            # 切片取到昨日为止
             arr_prev = np.array(closes[:-1])
             ma20_prev = talib.SMA(arr_prev, 20)[-1]
             ma60_prev = talib.SMA(arr_prev, 60)[-1]
             ma120_prev = talib.SMA(arr_prev, 120)[-1]
             
-            # 原始脚本 Step 6: prev_close <= max_ma 还是 prev_close <= min_ma? 
-            # 原始代码: (prev_row['close'] <= ma20_prev) or ... (只要小于任意一条即可? 还是必须压制?)
-            # 原文逻辑是: if (prev <= ma20) or (prev <= ma60) or (prev <= ma120) -> True
-            # 即：昨日收盘价至少被一条均线压制 (或在其下)
             if not ((prev_close <= ma20_prev) or (prev_close <= ma60_prev) or (prev_close <= ma120_prev)):
                 continue
         except: continue
         
-        # Step 5: 抵扣价 (略微简化，只判断是否满足)
-        # 原逻辑：抵扣价 < 1.2 * 当前价
+        # Step 5: 抵扣价 (略微简化判断)
         try:
             deduction_cond = True
             if len(closes) > 20: 
                 d20 = closes[-21]
                 if d20 >= 1.2 * curr_p: deduction_cond = False
-            # ... 省略60/120的详细判断以节省时间，通常20日最关键
         except: pass
         
-        # 记录中间结果
-        row['valuation_ratio'] = 0 # 占位
+        # 计算 7日涨跌幅 (当前价 vs 7个交易日前)
+        # closes[-1] is today, closes[-8] is 7 days ago? No, array index logic.
+        # closes list length N. closes[-1] is now. closes[-1-N]
+        day7_chg = 0.0
+        if len(closes) >= 9: # 至少要有当天+过去8天
+            c7 = closes[-9] # 7个交易日前的收盘价
+            day7_chg = (curr_p - c7) / c7 * 100
+        
+        row['day_7_chg'] = day7_chg
+        row['valuation_ratio'] = 0 
         row['strict_pass'] = False
         final_candidates.append(row)
 
     print(f"技术面筛选通过: {len(final_candidates)} 只")
     
     if not final_candidates:
-        send_feishu_msg("盘中筛选", "换手达标但未通过技术面(MA/形态)筛选")
+        send_feishu_msg("盘中筛选", "技术面(MA/形态)筛选后无结果")
         return
 
-    # 5. Step 4 & 7: 严苛财务筛选 (最耗时，仅对候选者执行)
+    # 5. Step 4 & 7: 严苛财务筛选
     print("Step 7: 严苛财务筛选...")
     strict_results = []
     
@@ -287,25 +285,24 @@ def run_intraday_screener():
         ts_code = row['ts_code']
         curr_p = row['price']
         
-        # 获取财务
         fin = get_financial_data(ts_code, last_trade_day)
         if not fin: continue
         
-        # Step 7.1: 扣非净利率 > 14%
         if fin['deducted_net_profit_margin'] <= 0.14: continue
         
-        # Step 4/7.2: 估值比 > 1
-        # 估值比 = (营收 * (净利率/0.14) * 10) / 总市值(万)
-        # 使用实时市值 row['total_mv_now'] (单位：万)
-        # 注意：total_mv_now 可能是 NaN，需检查
+        # 修正估值比单位问题：营收(元) -> 需要转换，市值(万)
+        # 公式：( 营收(元)/10000 * (净利率/0.14) * 10 ) / 总市值(万)
+        # 或者：( 营收(元) * ... ) / (总市值(万) * 10000)
+        # 这里统一把营收转为万，这样分子分母单位一致
+        revenue_wan = fin['revenue'] / 10000.0
+        
         if pd.isna(row['total_mv_now']) or row['total_mv_now'] == 0: continue
         
-        val_ratio = (fin['revenue'] * (fin['deducted_net_profit_margin'] / 0.14) * 10) / row['total_mv_now']
+        val_ratio = (revenue_wan * (fin['deducted_net_profit_margin'] / 0.14) * 10) / row['total_mv_now']
         if val_ratio <= 1: continue
         
         row['valuation_ratio'] = val_ratio
         
-        # Step 7.3: 户均流通市值 > 15万 (需要请求 holder 接口)
         holders = get_holders_data(ts_code, last_trade_day)
         if not holders: continue
         
@@ -317,41 +314,56 @@ def run_intraday_screener():
         per_capita_mv = (retail_shares * curr_p) / retail_holders
         if per_capita_mv <= 150000: continue
         
-        # Step 7.4: 增长分类
         row['growth'] = classify_growth(ts_code)
+        row['per_capita_mv_wan'] = per_capita_mv / 10000.0
+        row['concept'] = get_concept(ts_code) # 仅对最终结果获取概念
         
-        # 全部通过
-        row['strict_pass'] = True
         strict_results.append(row)
 
     # 6. 生成报告
     df_final = pd.DataFrame(strict_results)
     
     msg_lines = []
-    msg_lines.append(f"进度:{progress}% | 阈值:>{dynamic_threshold}%")
     
     if not df_final.empty:
-        # 按估值比排序 (对应 Step 7 逻辑)
+        # 按估值比排序
         df_final = df_final.sort_values('valuation_ratio', ascending=False)
         
+        msg_lines.append(f"进度: {progress}% | 动态阈值: >{dynamic_threshold}%")
         msg_lines.append(f"严苛筛选通过: {len(df_final)} 只")
-        msg_lines.append("代码 | 名称 | 增长 | 估值 | 涨幅")
         
-        for _, row in df_final.head(20).iterrows():
-            code = row['ts_code'].split('.')[0]
+        for i, row in df_final.head(15).iterrows(): # 限制展示前15只，防止太长
+            # 数据准备
+            code = row['ts_code']
             name = row['name']
-            growth = row.get('growth', '-')
-            val = f"{row['valuation_ratio']:.2f}"
+            ind = row.get('industry', '-')
+            concept = row.get('concept', '-')
             
-            # 计算实时涨幅
+            price = row['price']
             pre = float(row['pre_close'])
-            pct = (row['price'] - pre) / pre * 100
-            pct_str = f"{pct:.1f}%"
+            pct_now = (price - pre) / pre * 100
             
-            msg_lines.append(f"{code}|{name}|{growth}|{val}|{pct_str}")
+            day7 = row.get('day_7_chg', 0)
+            turn = row.get('turnover_rate_now', 0)
+            val = row.get('valuation_ratio', 0)
+            mv_per = row.get('per_capita_mv_wan', 0)
+            growth = row.get('growth', '-')
             
-        if len(df_final) > 20:
-            msg_lines.append(f"...剩余 {len(df_final)-20} 只见CSV")
+            # 构建详尽的卡片式单行
+            # 格式：
+            # 1. 名称(代码) | 行业 | 增长
+            # 2. 现价(涨幅) | 换手 | 7日
+            # 3. 估值比 | 户均市值 | 概念
+            
+            stock_block = (
+                f"\n🔴 **{name}** ({code}) | {ind} | {growth}\n"
+                f"   现价: {price:.2f} ({pct_now:+.2f}%) | 换手: {turn:.2f}% | 7日: {day7:+.1f}%\n"
+                f"   估值比: {val:.2f} | 户均: {mv_per:.1f}万 | 概念: {concept}"
+            )
+            msg_lines.append(stock_block)
+            
+        if len(df_final) > 15:
+            msg_lines.append(f"\n...剩余 {len(df_final)-15} 只请查看 GitHub Artifacts CSV")
             
         # 保存
         fname = f"Intraday_Strict_{datetime.datetime.now().strftime('%H%M')}.csv"
@@ -359,13 +371,16 @@ def run_intraday_screener():
         print(f"CSV生成: {fname}")
         
     else:
+        msg_lines.append(f"进度: {progress}% | 阈值: >{dynamic_threshold}%")
         msg_lines.append("无股票通过严苛财务筛选 (扣非>14% & 估值>1 & 户均>15万)")
-        # 为了不让用户以为程序挂了，可以发送技术面初筛的前几名
+        
         if final_candidates:
-            msg_lines.append(f"\n[备选] 技术面通过但财务未达标: {len(final_candidates)}只")
+            msg_lines.append(f"\n💡 [备选] 技术面通过但财务未达标: {len(final_candidates)}只")
+            # 简略展示前5
             top_tech = sorted(final_candidates, key=lambda x: x['turnover_rate_now'], reverse=True)[:5]
             for r in top_tech:
-                msg_lines.append(f"{r['name']} 换手:{r['turnover_rate_now']:.1f}%")
+                pct = (r['price'] - float(r['pre_close'])) / float(r['pre_close']) * 100
+                msg_lines.append(f"- {r['name']}: 涨{pct:.1f}% 换{r['turnover_rate_now']:.1f}%")
 
     send_feishu_msg("盘中严苛筛选 (Script 1)", "\n".join(msg_lines))
     print("执行完毕。")
